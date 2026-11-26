@@ -87,3 +87,27 @@ Clean disconnects update presence promptly. Abrupt network loss is detected by t
 Go offline is client-side connection intent: it closes that pane’s socket and suppresses reconnect until Go online. No database flag is necessary. Sends from another connected account still commit and acknowledge successfully, even with no recipient socket. They remain Sent until a receiving client acknowledges delivery. The reconnect snapshot includes all retained messages and the latest edits, revocations, visibility, preview, and unread summary; the UI must not mark them read merely because reconnect completed. This recovery also works after a backend restart, within the existing 24-hour room retention policy.
 
 These additive fields/events require no schema migration or history reset. Older clients can ignore them.
+
+## Durable local-first extension
+
+Snapshots include `version` on each message (initially 1). New edit commands include `expected_version`; successful edits/revocations advance the message version. Omitted expected versions remain accepted for legacy clients, but the local-first UI always supplies one.
+
+```json
+{"type":"command","id":"new-operation-id","action":"edit","message_id":"server-message-id","text":"reviewed edit","expected_version":3}
+```
+
+All durable commands have server-side outcome deduplication keyed by room, actor, and command ID, with a fingerprint of the action payload. Replaying an identical command returns its original outcome, including its original revision, even after later mutations or a restart. A changed payload under the same command ID returns `idempotency_conflict`. A stale edit returns `version_conflict`. Permanent errors are replayable; transient storage errors have `retryable:true` and retain pending work for retry.
+
+```json
+{"type":"ack","id":"operation-id","message_id":"server-message-id","revision":12}
+```
+
+```json
+{"type":"error","id":"operation-id","code":"version_conflict","message":"message changed on the server; review your edit","revision":13,"retryable":false}
+```
+
+Clients must serialize incoming events into their local database, retain the latest confirmed revision separately from queued projections, and settle an acknowledgment only once at least its revision has committed locally. An ACK can precede a locally applied snapshot if processing is interrupted; both facts remain durable until reconciled.
+
+A local message ID can remain stable while its server ID is assigned. Dependent actions resolve that mapping before their first network attempt. Once attempted, the wire payload and operation ID never change. Conflicting edits remain available for review; explicit retry uses a fresh command ID and the current version. Unknown or expired rooms do not trigger automatic resubmission into a new room.
+
+The receiver queues delivered receipts only after its local snapshot transaction commits. Read receipts are also durable local actions and retain the existing eligible-view requirements. Presence and typing are deliberately not persisted or replayed.

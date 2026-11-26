@@ -53,7 +53,7 @@ The two pre-registered identities are Demo A (`a`) and Demo B (`b`). A room's re
 
 Snapshots contain account-filtered conversation summaries and unread counts, recomputed after mutations. Unread excludes hidden, revoked, outgoing, and already-read messages. The latest revoked message remains a tombstone preview; personal deletion falls back to the previous visible entry.
 
-Room-scoped presence events aggregate authenticated sockets per account, independent of the open UI view. Sends commit successfully while the recipient is offline. Reconnect returns the persisted current history, including edits/revocations made during disconnection. Tests cover offline send acknowledgments, recovery across service/database restart, receipt progression, multiple sockets, and heartbeat failure. No schema migration is needed for this extension.
+Room-scoped presence events aggregate authenticated sockets per account, independent of the open UI view. Sends commit successfully while the recipient is offline. Reconnect returns the persisted current history, including edits/revocations made during disconnection. Tests cover offline send acknowledgments, recovery across service/database restart, receipt progression, multiple sockets, and heartbeat failure. The later local-first extension adds an idempotent schema migration for message versions and durable command outcomes; existing history is preserved.
 
 ## Persistence and limits
 
@@ -84,3 +84,13 @@ The multi-stage image runs as a non-root user with CA certificates and a writabl
 ## Provenance
 
 Sudoku adapts the local `../sudoku-solver/main.go` backtracking logic with validation, minimum-candidate selection, and cancellation. That repository is unchanged. CATAAS replaces the lost cat GIF repository; its original implementation was not recovered. Chat is a fresh portfolio implementation and does not copy company application code.
+
+## Local-first client synchronization
+
+Clients now maintain separate local SQLite replicas and durable outboxes. The shared backend database remains authoritative for permissions, canonical ordering, and accepted state. The API does not access a browser’s local database.
+
+Migration 002 adds message versions and `command_results`, scoped by room/account/operation ID. A transaction commits the mutation and its outcome together; repeated identical operations return the stored outcome without repeating side effects. Reuse of an operation ID with a different payload is rejected. Permanent domain rejections are retained too; database/infrastructure failures are retryable and are not recorded as permanent outcomes.
+
+New clients supply `expected_version` on edits. A stale version returns `version_conflict`; retry requires a new operation ID and an explicitly reviewed version. Legacy clients may omit the field for compatibility. Message versions begin at 1 and advance on edit/revoke. ACKs include the committed room revision, so clients settle their local outbox only after the matching canonical revision is persisted locally.
+
+Delivery now means the receiver committed incoming data locally before enqueueing its receipt. Offline sends and all supported actions stay in the client outbox across reloads. Server room expiry still removes central demo data after 24 inactive hours; clients retain local archives and blocked work until cleared and never silently migrate operations to a new room.
