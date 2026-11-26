@@ -18,12 +18,16 @@ import (
 //go:embed migrations/001_init.sql
 var schema string
 
+//go:embed migrations/002_command_results.sql
+var commandSchema string
+
 const retention = 24 * time.Hour
 
 var ErrExpired = errors.New("demo expired; start a new demo")
 var ErrUnauthorized = errors.New("invalid demo session")
 var ErrInvalid = errors.New("invalid chat command")
 var ErrForbidden = errors.New("message action is not allowed")
+var ErrVersionConflict = errors.New("message changed on the server; review your edit")
 var ErrConflict = errors.New("message ID was already used with different content")
 
 type Identity struct {
@@ -31,6 +35,7 @@ type Identity struct {
 	Actor string
 }
 type Message struct {
+	Version   int64  `json:"version"`
 	ID        string `json:"id"`
 	Sender    string `json:"sender_id"`
 	ClientID  string `json:"client_message_id"`
@@ -104,6 +109,27 @@ func Open(path string) (*Store, error) {
 	if _, err = db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;" + schema); err != nil {
 		db.Close()
 		return nil, err
+	}
+	var migrated int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version=2").Scan(&migrated); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if migrated == 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if _, err = tx.Exec(commandSchema); err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, err
+		}
+		if err = tx.Commit(); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if path != ":memory:" {
 		if err := os.Chmod(path, 0600); err != nil {
@@ -214,14 +240,14 @@ func (s *Store) Snapshot(ctx context.Context, id Identity) (Snapshot, error) {
 	if active < s.now().Add(-retention).UnixMilli() {
 		return result, ErrExpired
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.sender_id,m.client_id,m.text,m.reply_to,m.created_at,m.edited_at,m.revoked,m.delivered,m.read,COALESCE(p.starred,0),EXISTS(SELECT 1 FROM pins WHERE message_id=m.id AND room_id=m.room_id),CASE WHEN reply.revoked=1 OR COALESCE(rp.hidden,0)=1 THEN 'Message unavailable' ELSE COALESCE(reply.text,'') END FROM messages m LEFT JOIN preferences p ON p.message_id=m.id AND p.actor_id=? LEFT JOIN messages reply ON reply.id=m.reply_to AND reply.room_id=m.room_id LEFT JOIN preferences rp ON rp.message_id=reply.id AND rp.actor_id=? WHERE m.room_id=? AND COALESCE(p.hidden,0)=0 ORDER BY m.created_at,m.rowid`, id.Actor, id.Actor, id.Room)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.version,m.id,m.sender_id,m.client_id,m.text,m.reply_to,m.created_at,m.edited_at,m.revoked,m.delivered,m.read,COALESCE(p.starred,0),EXISTS(SELECT 1 FROM pins WHERE message_id=m.id AND room_id=m.room_id),CASE WHEN reply.revoked=1 OR COALESCE(rp.hidden,0)=1 THEN 'Message unavailable' ELSE COALESCE(reply.text,'') END FROM messages m LEFT JOIN preferences p ON p.message_id=m.id AND p.actor_id=? LEFT JOIN messages reply ON reply.id=m.reply_to AND reply.room_id=m.room_id LEFT JOIN preferences rp ON rp.message_id=reply.id AND rp.actor_id=? WHERE m.room_id=? AND COALESCE(p.hidden,0)=0 ORDER BY m.created_at,m.rowid`, id.Actor, id.Actor, id.Room)
 	if err != nil {
 		return result, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Sender, &m.ClientID, &m.Text, &m.ReplyTo, &m.Created, &m.Edited, &m.Revoked, &m.Delivered, &m.Read, &m.Starred, &m.Pinned, &m.ReplyText); err != nil {
+		if err := rows.Scan(&m.Version, &m.ID, &m.Sender, &m.ClientID, &m.Text, &m.ReplyTo, &m.Created, &m.Edited, &m.Revoked, &m.Delivered, &m.Read, &m.Starred, &m.Pinned, &m.ReplyText); err != nil {
 			return result, err
 		}
 		result.Messages = append(result.Messages, m)

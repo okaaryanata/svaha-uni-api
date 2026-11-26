@@ -3,34 +3,141 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode/utf8"
 )
 
 type Command struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	Action    string `json:"action"`
-	MessageID string `json:"message_id"`
-	ClientID  string `json:"client_message_id"`
-	Text      string `json:"text"`
-	ReplyTo   string `json:"reply_to"`
-	Enabled   bool   `json:"enabled"`
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
+	Type            string `json:"type"`
+	ID              string `json:"id"`
+	Action          string `json:"action"`
+	MessageID       string `json:"message_id"`
+	ClientID        string `json:"client_message_id"`
+	Text            string `json:"text"`
+	ReplyTo         string `json:"reply_to"`
+	Enabled         bool   `json:"enabled"`
 }
 
-// Apply serializes mutations and commits before the hub publishes snapshots.
+// Apply retains the convenient domain interface used by internal callers.
 func (s *Store) Apply(ctx context.Context, id Identity, c Command) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(c.ID) == 0 || len(c.ID) > 128 {
-		return "", ErrInvalid
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	result, err := s.Execute(ctx, id, c)
 	if err != nil {
 		return "", err
 	}
+	if result.ErrorCode != "" {
+		return "", result.domainError()
+	}
+	return result.MessageID, nil
+}
+
+type CommandResult struct {
+	MessageID    string `json:"message_id,omitempty"`
+	Revision     int64  `json:"revision"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+func (r CommandResult) domainError() error {
+	switch r.ErrorCode {
+	case "invalid":
+		return ErrInvalid
+	case "forbidden":
+		return ErrForbidden
+	case "expired":
+		return ErrExpired
+	case "version_conflict":
+		return ErrVersionConflict
+	case "idempotency_conflict":
+		return ErrConflict
+	default:
+		return errors.New(r.ErrorMessage)
+	}
+}
+func commandFailure(err error) CommandResult {
+	code := "rejected"
+	switch {
+	case errors.Is(err, ErrInvalid):
+		code = "invalid"
+	case errors.Is(err, ErrForbidden):
+		code = "forbidden"
+	case errors.Is(err, ErrExpired):
+		code = "expired"
+	case errors.Is(err, ErrVersionConflict):
+		code = "version_conflict"
+	case errors.Is(err, ErrConflict):
+		code = "idempotency_conflict"
+	}
+	return CommandResult{ErrorCode: code, ErrorMessage: err.Error()}
+}
+
+// Execute atomically stores each mutation and its replayable outcome.
+func (s *Store) Execute(ctx context.Context, id Identity, c Command) (CommandResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(c.ID) == 0 || len(c.ID) > 128 {
+		return commandFailure(ErrInvalid), nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CommandResult{}, err
+	}
 	defer tx.Rollback()
+	var active int64
+	if err = tx.QueryRowContext(ctx, "SELECT last_active FROM rooms WHERE id=?", id.Room).Scan(&active); err == sql.ErrNoRows {
+		return commandFailure(ErrExpired), nil
+	} else if err != nil {
+		return CommandResult{}, err
+	}
+	if active < s.now().Add(-retention).UnixMilli() {
+		return commandFailure(ErrExpired), nil
+	}
+	fingerprintCommand := c
+	fingerprintCommand.ID = ""
+	fingerprintCommand.Type = ""
+	payload, _ := json.Marshal(fingerprintCommand)
+	fingerprint := hash(string(payload))
+	var storedFingerprint, storedJSON string
+	err = tx.QueryRowContext(ctx, "SELECT fingerprint,result_json FROM command_results WHERE room_id=? AND actor_id=? AND command_id=?", id.Room, id.Actor, c.ID).Scan(&storedFingerprint, &storedJSON)
+	if err == nil {
+		if storedFingerprint != fingerprint {
+			return commandFailure(ErrConflict), nil
+		}
+		var result CommandResult
+		err = json.Unmarshal([]byte(storedJSON), &result)
+		return result, err
+	}
+	if err != sql.ErrNoRows {
+		return CommandResult{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "SAVEPOINT mutation"); err != nil {
+		return CommandResult{}, err
+	}
+	messageID, actionErr := s.applyTx(ctx, tx, id, c)
+	result := CommandResult{MessageID: messageID}
+	if actionErr != nil {
+		if _, err = tx.ExecContext(ctx, "ROLLBACK TO mutation"); err != nil {
+			return CommandResult{}, err
+		}
+		// Infrastructure errors are retryable and must not be remembered as rejection.
+		if !errors.Is(actionErr, ErrInvalid) && !errors.Is(actionErr, ErrForbidden) && !errors.Is(actionErr, ErrExpired) && !errors.Is(actionErr, ErrVersionConflict) && !errors.Is(actionErr, ErrConflict) && actionErr.Error() != "demo message limit reached; start a new demo" {
+			return CommandResult{}, actionErr
+		}
+		result = commandFailure(actionErr)
+	}
+	if err = tx.QueryRowContext(ctx, "SELECT revision FROM rooms WHERE id=?", id.Room).Scan(&result.Revision); err != nil {
+		return CommandResult{}, err
+	}
+	encoded, _ := json.Marshal(result)
+	if _, err = tx.ExecContext(ctx, "INSERT INTO command_results VALUES(?,?,?,?,?)", id.Room, id.Actor, c.ID, fingerprint, string(encoded)); err != nil {
+		return CommandResult{}, err
+	}
+	return result, tx.Commit()
+}
+func (s *Store) applyTx(ctx context.Context, tx *sql.Tx, id Identity, c Command) (string, error) {
+	var err error
 	var active int64
 	if err := tx.QueryRowContext(ctx, "SELECT last_active FROM rooms WHERE id=?", id.Room).Scan(&active); err != nil {
 		return "", ErrExpired
@@ -73,7 +180,8 @@ func (s *Store) Apply(ctx context.Context, id Identity, c Command) (string, erro
 	} else {
 		var sender string
 		var revoked bool
-		err = tx.QueryRowContext(ctx, "SELECT sender_id,revoked FROM messages WHERE id=? AND room_id=?", messageID, id.Room).Scan(&sender, &revoked)
+		var version int64
+		err = tx.QueryRowContext(ctx, "SELECT sender_id,revoked,version FROM messages WHERE id=? AND room_id=?", messageID, id.Room).Scan(&sender, &revoked, &version)
 		if err == sql.ErrNoRows {
 			return "", ErrInvalid
 		}
@@ -82,18 +190,21 @@ func (s *Store) Apply(ctx context.Context, id Identity, c Command) (string, erro
 		}
 		switch c.Action {
 		case "edit":
+			if c.ExpectedVersion != nil && *c.ExpectedVersion != version {
+				return "", ErrVersionConflict
+			}
 			if sender != id.Actor || revoked {
 				return "", ErrForbidden
 			}
 			if strings.TrimSpace(c.Text) == "" || utf8.RuneCountInString(c.Text) > 2000 {
 				return "", ErrInvalid
 			}
-			_, err = tx.ExecContext(ctx, "UPDATE messages SET text=?,edited_at=? WHERE id=?", c.Text, s.now().UnixMilli(), messageID)
+			_, err = tx.ExecContext(ctx, "UPDATE messages SET text=?,edited_at=?,version=version+1 WHERE id=?", c.Text, s.now().UnixMilli(), messageID)
 		case "revoke":
 			if sender != id.Actor {
 				return "", ErrForbidden
 			}
-			_, err = tx.ExecContext(ctx, "UPDATE messages SET text='',revoked=1 WHERE id=?", messageID)
+			_, err = tx.ExecContext(ctx, "UPDATE messages SET text='',revoked=1,version=version+1 WHERE id=?", messageID)
 			if err == nil {
 				_, err = tx.ExecContext(ctx, "DELETE FROM pins WHERE message_id=?", messageID)
 			}
@@ -146,5 +257,5 @@ func (s *Store) Apply(ctx context.Context, id Identity, c Command) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return messageID, tx.Commit()
+	return messageID, nil
 }

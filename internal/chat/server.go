@@ -3,7 +3,6 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/coder/websocket"
 	"io"
 	"log/slog"
@@ -266,10 +265,10 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		message, err := s.store.Apply(ctx, id, command)
+		result, err := s.store.Execute(ctx, id, command)
 		if err == nil {
 			for other := range s.peers {
-				if other.id.Room != id.Room {
+				if other.id.Room != id.Room || (result.ErrorCode != "" && other != p) {
 					continue
 				}
 				snapshot, e := s.store.Snapshot(ctx, other.id)
@@ -277,16 +276,16 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 					s.enqueueLocked(other, snapshot)
 				}
 			}
-			s.enqueueLocked(p, map[string]any{"type": "ack", "id": command.ID, "message_id": message})
-		} else {
-			safe := "unable to apply chat command"
-			if errors.Is(err, ErrInvalid) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrConflict) || errors.Is(err, ErrExpired) {
-				safe = err.Error()
+			if result.ErrorCode == "" {
+				s.enqueueLocked(p, map[string]any{"type": "ack", "id": command.ID, "message_id": result.MessageID, "revision": result.Revision})
 			} else {
-				slog.Warn("chat command failed", "error", err)
+				s.enqueueLocked(p, map[string]any{"type": "error", "id": command.ID, "code": result.ErrorCode, "message": result.ErrorMessage, "revision": result.Revision, "retryable": false})
 			}
-			s.enqueueLocked(p, map[string]any{"type": "error", "id": command.ID, "message": safe})
+		} else {
+			slog.Warn("chat command failed", "error", err)
+			s.enqueueLocked(p, map[string]any{"type": "error", "id": command.ID, "code": "temporarily_unavailable", "message": "Unable to save; this operation will retry.", "retryable": true})
 		}
+
 		s.mu.Unlock()
 	}
 }
