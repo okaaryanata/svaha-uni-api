@@ -24,13 +24,15 @@ type rateEntry struct {
 	count int
 }
 type Server struct {
-	connections int
-	store       *Store
-	mu          sync.Mutex
-	peers       map[*peer]bool
-	origins     map[string]bool
-	rates       map[string]rateEntry
-	closed      bool
+	connections      int
+	store            *Store
+	mu               sync.Mutex
+	peers            map[*peer]bool
+	origins          map[string]bool
+	rates            map[string]rateEntry
+	closed           bool
+	heartbeatEvery   time.Duration
+	heartbeatTimeout time.Duration
 }
 
 func NewServer(store *Store, origins []string) *Server {
@@ -38,7 +40,7 @@ func NewServer(store *Store, origins []string) *Server {
 	for _, origin := range origins {
 		allowed[strings.TrimSpace(origin)] = true
 	}
-	return &Server{store: store, peers: map[*peer]bool{}, origins: allowed, rates: map[string]rateEntry{}}
+	return &Server{store: store, peers: map[*peer]bool{}, origins: allowed, rates: map[string]rateEntry{}, heartbeatEvery: 20 * time.Second, heartbeatTimeout: 5 * time.Second}
 }
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/chat/demos", s.create)
@@ -175,17 +177,21 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.peers[p] = true
 	initial, err := s.store.Snapshot(ctx, id)
-	if err == nil {
-		p.queue <- initial
-	}
-	s.mu.Unlock()
 	if err != nil {
-		s.mu.Lock()
 		delete(s.peers, p)
 		s.mu.Unlock()
 		return
 	}
-	defer func() { s.mu.Lock(); delete(s.peers, p); s.typingLocked(id, false); s.mu.Unlock() }()
+	p.queue <- initial
+	s.presenceLocked(id.Room)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.peers, p)
+		s.typingLocked(id, false)
+		s.presenceLocked(id.Room)
+		s.mu.Unlock()
+	}()
 	go func() {
 		defer cancel()
 		for {
@@ -207,7 +213,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	go func() {
-		ticker := time.NewTicker(20 * time.Second)
+		ticker := time.NewTicker(s.heartbeatEvery)
 		defer ticker.Stop()
 		for {
 			select {
@@ -218,7 +224,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 					cancel()
 					return
 				}
-				pingCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+				pingCtx, stop := context.WithTimeout(ctx, s.heartbeatTimeout)
 				err := conn.Ping(pingCtx)
 				stop()
 				if err != nil {
@@ -294,6 +300,25 @@ func (s *Server) enqueueLocked(p *peer, event any) {
 	case p.queue <- event:
 	default:
 		p.cancel()
+	}
+}
+
+// Presence is room-scoped and aggregates all authenticated sockets for an account.
+func (s *Server) presenceLocked(room string) {
+	accounts := map[string]bool{"a": false, "b": false}
+	for p := range s.peers {
+		if p.id.Room == room {
+			accounts[p.id.Actor] = true
+		}
+	}
+	event := struct {
+		Type     string          `json:"type"`
+		Accounts map[string]bool `json:"accounts"`
+	}{Type: "presence", Accounts: accounts}
+	for p := range s.peers {
+		if p.id.Room == room {
+			s.enqueueLocked(p, event)
+		}
 	}
 }
 func (s *Server) typingLocked(id Identity, enabled bool) {

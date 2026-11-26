@@ -45,10 +45,44 @@ type Message struct {
 	Starred   bool   `json:"starred"`
 	Pinned    bool   `json:"pinned"`
 }
+type ConversationPeer struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+type MessagePreview struct {
+	ID      string `json:"id"`
+	Sender  string `json:"sender_id"`
+	Text    string `json:"text"`
+	Created int64  `json:"created_at"`
+	Edited  int64  `json:"edited_at,omitempty"`
+	Revoked bool   `json:"revoked"`
+}
+type Conversation struct {
+	Peer        ConversationPeer `json:"peer"`
+	UnreadCount int              `json:"unread_count"`
+	LastMessage *MessagePreview  `json:"last_message"`
+}
+
+func conversationFor(messages []Message, actor string) Conversation {
+	peerID, peerName := "a", "Demo A"
+	if actor == "a" {
+		peerID, peerName = "b", "Demo B"
+	}
+	result := Conversation{Peer: ConversationPeer{ID: peerID, Name: peerName}}
+	for _, message := range messages {
+		if message.Sender != actor && !message.Read && !message.Revoked {
+			result.UnreadCount++
+		}
+		result.LastMessage = &MessagePreview{ID: message.ID, Sender: message.Sender, Text: message.Text, Created: message.Created, Edited: message.Edited, Revoked: message.Revoked}
+	}
+	return result
+}
+
 type Snapshot struct {
-	Type     string    `json:"type"`
-	Revision int64     `json:"revision"`
-	Messages []Message `json:"messages"`
+	Type         string       `json:"type"`
+	Revision     int64        `json:"revision"`
+	Messages     []Message    `json:"messages"`
+	Conversation Conversation `json:"conversation"`
 }
 type Store struct {
 	db  *sql.DB
@@ -192,5 +226,6 @@ func (s *Store) Snapshot(ctx context.Context, id Identity) (Snapshot, error) {
 		}
 		result.Messages = append(result.Messages, m)
 	}
+	result.Conversation = conversationFor(result.Messages, id.Actor)
 	return result, rows.Err()
 }
