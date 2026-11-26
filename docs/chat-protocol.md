@@ -59,3 +59,31 @@ Each snapshot message includes `id`, `sender_id`, `client_message_id`, `text`, `
 ## Lifecycle
 
 Reconnect with exponential backoff capped at 30 seconds. Policy-close code 1008 requires a fresh session; an expired room requires a new demo. Ping/pong checks connection health without extending room retention. Messages and session capabilities survive service restart. Typing does not.
+
+## Conversation lists and unread summaries
+
+Every snapshot also contains a viewer-specific `conversation` value:
+
+```json
+{"peer":{"id":"b","name":"Demo B"},"unread_count":2,"last_message":{"id":"message-id","sender_id":"b","text":"Latest message","created_at":1700000000000,"revoked":false}}
+```
+
+`last_message` is null if no messages are visible. It includes `edited_at` when edited. Summaries use the same ordered, account-filtered history as `messages`: personal deletions cannot leak through previews. Unread counts include only visible incoming messages that are neither read nor revoked. Delivery alone does not clear unread state. Editing changes the preview text without resetting receipts or reordering the conversation; pin/star operations do not change its latest message. A revoked latest message remains the preview entry with empty text and `revoked:true`, rendered as Message revoked. Hiding it selects the previous visible entry.
+
+The frontend initially shows conversation lists. It sends read commands only while detail is open, all-messages is selected, the conversation is scrolled to the bottom, the latest messages are visible, and the document is active. Being online is independent of viewing detail.
+
+## Presence and offline recovery
+
+After the initial snapshot, and whenever authenticated connection membership changes, the server sends a room-scoped event:
+
+```json
+{"type":"presence","accounts":{"a":true,"b":false}}
+```
+
+Presence aggregates all authenticated sockets for each account in this room. Closing one of several sockets does not make an account offline; closing the last does. Presence events are transient and ordered on each connection, independent of durable message revisions. The frontend discards events from superseded sockets and shows Unknown for peer presence when its own connection is down.
+
+Clean disconnects update presence promptly. Abrupt network loss is detected by the 20-second heartbeat and 5-second ping timeout. Presence, typing, and heartbeat traffic do not extend room retention.
+
+Go offline is client-side connection intent: it closes that pane’s socket and suppresses reconnect until Go online. No database flag is necessary. Sends from another connected account still commit and acknowledge successfully, even with no recipient socket. They remain Sent until a receiving client acknowledges delivery. The reconnect snapshot includes all retained messages and the latest edits, revocations, visibility, preview, and unread summary; the UI must not mark them read merely because reconnect completed. This recovery also works after a backend restart, within the existing 24-hour room retention policy.
+
+These additive fields/events require no schema migration or history reset. Older clients can ignore them.

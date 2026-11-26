@@ -49,6 +49,12 @@ See [the chat protocol](docs/chat-protocol.md) for examples and action semantics
 
 The two pre-registered identities are Demo A (`a`) and Demo B (`b`). A room's recovery capability permits signing in as either identity for that room only; no public password or registration flow is needed. Never put real private conversations into this public portfolio demo.
 
+## Conversation lists and presence
+
+Snapshots contain account-filtered conversation summaries and unread counts, recomputed after mutations. Unread excludes hidden, revoked, outgoing, and already-read messages. The latest revoked message remains a tombstone preview; personal deletion falls back to the previous visible entry.
+
+Room-scoped presence events aggregate authenticated sockets per account, independent of the open UI view. Sends commit successfully while the recipient is offline. Reconnect returns the persisted current history, including edits/revocations made during disconnection. Tests cover offline send acknowledgments, recovery across service/database restart, receipt progression, multiple sockets, and heartbeat failure. No schema migration is needed for this extension.
+
 ## Persistence and limits
 
 Rooms expire after 24 hours without authenticated login or durable message activity. Typing and WebSocket heartbeats do not extend retention. Startup and minute-by-minute cleanup cascade-delete expired rooms, messages, preferences, pins, and sessions. Active sockets stop working on expiry and the frontend offers a new demo.
