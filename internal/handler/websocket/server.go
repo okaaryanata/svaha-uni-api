@@ -1,19 +1,21 @@
-package chat
+package websocket
 
 import (
 	"context"
 	"encoding/json"
-	"github.com/coder/websocket"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
+	domain "github.com/okaaryanata/svaha-uni-api/internal/domain/chat"
 )
 
 type peer struct {
-	id     Identity
+	id     domain.Identity
 	conn   *websocket.Conn
 	queue  chan any
 	cancel context.CancelFunc
@@ -24,7 +26,7 @@ type rateEntry struct {
 }
 type Server struct {
 	connections      int
-	store            *Store
+	store            ChatService
 	mu               sync.Mutex
 	peers            map[*peer]bool
 	origins          map[string]bool
@@ -34,7 +36,7 @@ type Server struct {
 	heartbeatTimeout time.Duration
 }
 
-func NewServer(store *Store, origins []string) *Server {
+func NewServer(store ChatService, origins []string) *Server {
 	allowed := map[string]bool{}
 	for _, origin := range origins {
 		allowed[strings.TrimSpace(origin)] = true
@@ -50,7 +52,9 @@ func jsonResponse(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Warn("write JSON response", "error", err)
+	}
 }
 func httpError(w http.ResponseWriter, status int, message string) {
 	jsonResponse(w, status, map[string]any{"error": map[string]string{"message": message}})
@@ -102,7 +106,10 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	entry.count++
 	s.rates[ip] = entry
 	s.mu.Unlock()
-	s.store.Prune(r.Context())
+	if err := s.store.Prune(r.Context()); err != nil {
+		httpError(w, 503, "unable to clean up demos; retry later")
+		return
+	}
 	room, secret, err := s.store.Create(r.Context())
 	if err != nil {
 		httpError(w, 503, "unable to create demo; retry later")
@@ -144,7 +151,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(16384)
 	authCtx, authCancel := context.WithTimeout(r.Context(), 5*time.Second)
 	_, data, err := conn.Read(authCtx)
@@ -157,12 +164,12 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if json.Unmarshal(data, &auth) != nil || auth.Type != "auth" {
-		conn.Close(websocket.StatusPolicyViolation, "authentication required")
+		_ = conn.Close(websocket.StatusPolicyViolation, "authentication required")
 		return
 	}
 	id, err := s.store.Authenticate(r.Context(), auth.Token)
 	if err != nil {
-		conn.Close(websocket.StatusPolicyViolation, "session expired")
+		_ = conn.Close(websocket.StatusPolicyViolation, "session expired")
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -246,10 +253,10 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 		}
 		commands++
 		if commands > 40 {
-			conn.Close(websocket.StatusPolicyViolation, "too many commands")
+			_ = conn.Close(websocket.StatusPolicyViolation, "too many commands")
 			return
 		}
-		var command Command
+		var command domain.Command
 		if json.Unmarshal(data, &command) != nil || command.Type != "command" {
 			s.enqueue(p, map[string]any{"type": "error", "message": "invalid command"})
 			continue
@@ -261,7 +268,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if _, err := s.store.Authenticate(ctx, auth.Token); err != nil {
-			conn.Close(websocket.StatusPolicyViolation, "session expired")
+			_ = conn.Close(websocket.StatusPolicyViolation, "session expired")
 			return
 		}
 		s.mu.Lock()
@@ -320,7 +327,7 @@ func (s *Server) presenceLocked(room string) {
 		}
 	}
 }
-func (s *Server) typingLocked(id Identity, enabled bool) {
+func (s *Server) typingLocked(id domain.Identity, enabled bool) {
 	for p := range s.peers {
 		if p.id.Room == id.Room && p.id.Actor != id.Actor {
 			s.enqueueLocked(p, map[string]any{"type": "typing", "account_id": id.Actor, "enabled": enabled})
@@ -334,4 +341,14 @@ func (s *Server) Close() {
 	for p := range s.peers {
 		p.cancel()
 	}
+}
+
+// ChatService is the use-case boundary consumed by HTTP and WebSocket transports.
+type ChatService interface {
+	Create(context.Context) (string, string, error)
+	Login(context.Context, string, string, string) (string, error)
+	Authenticate(context.Context, string) (domain.Identity, error)
+	Prune(context.Context) error
+	Snapshot(context.Context, domain.Identity) (domain.Snapshot, error)
+	Execute(context.Context, domain.Identity, domain.Command) (domain.CommandResult, error)
 }

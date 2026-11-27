@@ -1,4 +1,4 @@
-package chat
+package websocket
 
 import (
 	"context"
@@ -15,12 +15,12 @@ func fixture(t *testing.T) (*Store, Identity, Identity) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	room, _, err := s.Create(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, Identity{room, "a"}, Identity{room, "b"}
+	return s, Identity{Room: room, Actor: "a"}, Identity{Room: room, Actor: "b"}
 }
 func apply(t *testing.T, s *Store, id Identity, c Command) string {
 	t.Helper()
@@ -136,7 +136,7 @@ func TestIsolationAndReceipts(t *testing.T) {
 		}
 	}
 	room, _, _ := s.Create(context.Background())
-	other := Identity{room, "a"}
+	other := Identity{Room: room, Actor: "a"}
 	for _, action := range []string{"edit", "revoke", "delete", "star", "pin", "read"} {
 		if _, err := s.Apply(context.Background(), other, Command{ID: randomID(), Action: action, MessageID: first, Text: "bad", Enabled: true}); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("cross-room %s: %v", action, err)
@@ -169,15 +169,15 @@ func TestPersistenceSessionsAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := Identity{room, "a"}
+	a := Identity{Room: room, Actor: "a"}
 	message := send(t, s, a, "persistent")
 	apply(t, s, a, Command{Action: "star", MessageID: message, Enabled: true})
-	s.Close()
+	_ = s.Close()
 	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if id, err := s.Authenticate(context.Background(), token); err != nil || id != a {
 		t.Fatalf("session lost %v", err)
 	}
@@ -195,7 +195,9 @@ func TestPersistenceSessionsAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	s.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
 	if count != 0 {
 		t.Fatal("cleanup did not cascade")
 	}
@@ -215,7 +217,9 @@ func TestValidationAndSessionBounds(t *testing.T) {
 		}
 	}
 	var sessions int
-	s.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE room_id=?", room).Scan(&sessions)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE room_id=?", room).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
 	if sessions != 8 {
 		t.Fatalf("sessions not bounded: %d", sessions)
 	}

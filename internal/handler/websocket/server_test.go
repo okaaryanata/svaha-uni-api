@@ -1,14 +1,15 @@
-package chat
+package websocket
 
 import (
 	"context"
 	"encoding/json"
-	"github.com/coder/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 const testOrigin = "http://localhost:4173"
@@ -17,11 +18,11 @@ func socketClient(t *testing.T, url, token string) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{testOrigin}}})
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{testOrigin}}}) //nolint:bodyclose // coder/websocket owns and closes the handshake body.
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.CloseNow() })
+	t.Cleanup(func() { _ = conn.CloseNow() })
 	writeFrame(t, conn, map[string]string{"type": "auth", "token": token})
 	return conn
 }
@@ -63,8 +64,8 @@ func TestTwoRealClientsSendReconnectAndActions(t *testing.T) {
 	mux := http.NewServeMux()
 	hub.Register(mux)
 	server := httptest.NewServer(mux)
-	defer server.Close()
-	defer hub.Close()
+	defer func() { server.Close() }()
+	defer func() { hub.Close() }()
 	ca, cb := socketClient(t, server.URL, tokenA), socketClient(t, server.URL, tokenB)
 	readSnapshot(t, ca, func(s Snapshot) bool { return len(s.Messages) == 0 })
 	readSnapshot(t, cb, func(s Snapshot) bool { return len(s.Messages) == 0 })
@@ -79,7 +80,7 @@ func TestTwoRealClientsSendReconnectAndActions(t *testing.T) {
 	readSnapshot(t, ca, func(s Snapshot) bool { return len(s.Messages) == 1 && s.Messages[0].Read })
 	writeFrame(t, cb, Command{Type: "command", ID: "send-b", Action: "send", ClientID: "unique-b", Text: "reply from B", ReplyTo: message})
 	readSnapshot(t, ca, func(s Snapshot) bool { return len(s.Messages) == 2 && s.Messages[1].ReplyText == "hello from A" })
-	ca.CloseNow()
+	_ = ca.CloseNow()
 	ca = socketClient(t, server.URL, tokenA)
 	readSnapshot(t, ca, func(s Snapshot) bool { return len(s.Messages) == 2 })
 	writeFrame(t, ca, sendA)
@@ -114,11 +115,11 @@ func TestWebSocketOriginAndAuthentication(t *testing.T) {
 	mux := http.NewServeMux()
 	hub.Register(mux)
 	server := httptest.NewServer(mux)
-	defer server.Close()
-	defer hub.Close()
+	defer func() { server.Close() }()
+	defer func() { hub.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, res, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"https://unknown.test"}}})
+	_, res, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"https://unknown.test"}}}) //nolint:bodyclose // coder/websocket owns and closes the handshake body.
 	if err == nil || res.StatusCode != 403 {
 		t.Fatal("untrusted WebSocket origin accepted")
 	}

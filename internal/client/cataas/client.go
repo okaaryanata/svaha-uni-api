@@ -1,4 +1,4 @@
-package cats
+package cataas
 
 import (
 	"context"
@@ -24,7 +24,7 @@ func (c Client) GIF(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return nil, errors.New("cat provider unavailable")
 	}
