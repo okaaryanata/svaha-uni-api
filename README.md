@@ -74,9 +74,9 @@ Tests cover the original Sudoku puzzle, invalid/unsolvable inputs and cancellati
 ## Docker
 
 ```sh
-docker build -t oka-portfolio-api .
+docker build -t svaha-uni-api .
 docker volume create oka-chat-data
-docker run --rm -p 127.0.0.1:8081:8081 -v oka-chat-data:/data oka-portfolio-api
+docker run --rm -p 127.0.0.1:8081:8081 -v oka-chat-data:/data svaha-uni-api
 ```
 
 The multi-stage image runs as a non-root user with CA certificates and a writable `/data` directory. The frontend's Compose file builds this sibling repository and provides a named SQLite volume. Back up the database using SQLite-aware tooling; do not copy an active database file without its WAL/checkpoint considerations.

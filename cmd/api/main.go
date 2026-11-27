@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/okaaryanata/oka-portfolio-api/internal/cats"
-	"github.com/okaaryanata/oka-portfolio-api/internal/chat"
-	"github.com/okaaryanata/oka-portfolio-api/internal/httpapi"
+	"github.com/okaaryanata/svaha-uni-api/internal/cats"
+	"github.com/okaaryanata/svaha-uni-api/internal/chat"
+	"github.com/okaaryanata/svaha-uni-api/internal/httpapi"
 	"log/slog"
 	"net/http"
 	"os"
