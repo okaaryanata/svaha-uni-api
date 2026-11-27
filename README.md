@@ -24,15 +24,15 @@ Use an explicit loopback address for local-only API access. Add the exact produc
 
 ## Structure
 
-```text
-cmd/api/                     process configuration and graceful shutdown
-internal/httpapi/            shared HTTP routing, limits and CORS
-internal/chat/               sessions, transactional commands, WebSocket hub
-internal/chat/migrations/    embedded SQLite schema, applied at startup
-internal/sudoku/             validated, cancellable Go solver
-internal/cats/               bounded CATAAS client
-docs/chat-protocol.md         session, command and event contract
-```
+- `cmd/api`: minimal process entry point.
+- `internal/app`: configuration, composition and lifecycle.
+- `internal/domain`: chat models/rules and the Sudoku solver.
+- `internal/service`: use cases and consumer-owned repository/provider ports.
+- `internal/repository/sqlite`: SQL, transactions and embedded migrations.
+- `internal/client/cataas`: bounded external provider adapter.
+- `internal/handler`: HTTP and WebSocket adapters, presence and fanout.
+
+See [architecture](docs/architecture.md), [agent rules](AGENTS.md), and [AI workflow](docs/ai-workflow.md).
 
 Chat mutations are committed to SQLite before snapshots or acknowledgments are sent. Internal events are dispatched to room subscribers with viewer-specific stars, deletions, and reply previews. Each socket has a bounded queue; slow or disconnected clients reconnect and obtain an authoritative snapshot. One service process owns the database and in-memory room hub; do not run multiple replicas against this design without a shared event transport and suitable database architecture.
 
@@ -66,7 +66,7 @@ Defaults: 1,000 rooms; 500 messages per room; 2,000 Unicode characters per messa
 ```sh
 go test -race ./...
 go vet ./...
-CGO_ENABLED=0 go build -o bin/api ./cmd/api
+CGO_ENABLED=0 go build -o bin/svaha-uni-api ./cmd/api
 ```
 
 Tests cover the original Sudoku puzzle, invalid/unsolvable inputs and cancellation, cat provider errors/size limits, SQLite persistence/expiry, concurrent deduplication, permissions, private visibility, receipts, and two real authenticated WebSocket clients. Network tests need permission to bind ephemeral localhost ports. With both services running, `API_SMOKE_URL=http://127.0.0.1:4173 go test ./integration -v` also checks the frontend HTTP/WebSocket proxy.
@@ -74,9 +74,9 @@ Tests cover the original Sudoku puzzle, invalid/unsolvable inputs and cancellati
 ## Docker
 
 ```sh
-docker build -t oka-portfolio-api .
+docker build -t svaha-uni-api .
 docker volume create oka-chat-data
-docker run --rm -p 127.0.0.1:8081:8081 -v oka-chat-data:/data oka-portfolio-api
+docker run --rm -p 127.0.0.1:8081:8081 -v oka-chat-data:/data svaha-uni-api
 ```
 
 The multi-stage image runs as a non-root user with CA certificates and a writable `/data` directory. The frontend's Compose file builds this sibling repository and provides a named SQLite volume. Back up the database using SQLite-aware tooling; do not copy an active database file without its WAL/checkpoint considerations.
@@ -94,3 +94,13 @@ Migration 002 adds message versions and `command_results`, scoped by room/accoun
 New clients supply `expected_version` on edits. A stale version returns `version_conflict`; retry requires a new operation ID and an explicitly reviewed version. Legacy clients may omit the field for compatibility. Message versions begin at 1 and advance on edit/revoke. ACKs include the committed room revision, so clients settle their local outbox only after the matching canonical revision is persisted locally.
 
 Delivery now means the receiver committed incoming data locally before enqueueing its receipt. Offline sends and all supported actions stay in the client outbox across reloads. Server room expiry still removes central demo data after 24 inactive hours; clients retain local archives and blocked work until cleared and never silently migrate operations to a new room.
+
+## Required quality checks
+
+Use Go 1.26 for the local checks and build tooling (the module retains its Go 1.25 language baseline):
+
+```sh
+make check
+```
+
+This installs pinned GolangCI-Lint v2.15.0 into ignored `.tools`, checks lint and gofmt/goimports, runs race tests, builds `bin/svaha-uni-api`, and runs go vet. `make fmt` applies formatting. CI uses the same check target. Existing migrations and data paths remain unchanged during the repository rename.

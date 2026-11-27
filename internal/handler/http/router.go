@@ -1,16 +1,18 @@
-package httpapi
+package http
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/okaaryanata/oka-portfolio-api/internal/chat"
-	"github.com/okaaryanata/oka-portfolio-api/internal/sudoku"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/okaaryanata/svaha-uni-api/internal/domain/sudoku"
+	chat "github.com/okaaryanata/svaha-uni-api/internal/handler/websocket"
+	sudokuservice "github.com/okaaryanata/svaha-uni-api/internal/service/sudoku"
 )
 
 type GIFProvider interface {
@@ -44,7 +46,7 @@ func New(provider GIFProvider, origins []string, chats ...*chat.Server) http.Han
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		board, err := sudoku.Solve(ctx, request.Board)
+		board, err := sudokuservice.New().Solve(ctx, request.Board)
 		switch {
 		case errors.Is(err, sudoku.ErrInvalid):
 			fail(w, 422, "invalid_board", err.Error())
@@ -67,7 +69,9 @@ func New(provider GIFProvider, origins []string, chats ...*chat.Server) http.Han
 		}
 		w.Header().Set("Content-Type", "image/gif")
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			slog.Warn("write GIF response", "error", err)
+		}
 	})
 	allowed := make(map[string]bool)
 	for _, origin := range origins {
@@ -110,7 +114,9 @@ func New(provider GIFProvider, origins []string, chats ...*chat.Server) http.Han
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Warn("write JSON response", "error", err)
+	}
 }
 func fail(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})

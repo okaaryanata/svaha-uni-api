@@ -1,4 +1,4 @@
-module github.com/okaaryanata/oka-portfolio-api
+module github.com/okaaryanata/svaha-uni-api
 
 go 1.25.0
 

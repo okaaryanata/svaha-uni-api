@@ -1,4 +1,4 @@
-package chat
+package websocket
 
 import (
 	"context"
@@ -16,7 +16,7 @@ func TestDurableCommandOutcomesAndEditConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	room, _, _ := s.Create(context.Background())
-	id := Identity{room, "a"}
+	id := Identity{Room: room, Actor: "a"}
 	message := apply(t, s, id, Command{ID: "send", Action: "send", ClientID: "local-send", Text: "original"})
 	edit := Command{ID: "edit-one", Action: "edit", MessageID: message, Text: "first edit", ExpectedVersion: versionPointer(1)}
 	first, err := s.Execute(context.Background(), id, edit)
@@ -39,12 +39,12 @@ func TestDurableCommandOutcomesAndEditConflicts(t *testing.T) {
 	if err != nil || rejected.ErrorCode != "version_conflict" {
 		t.Fatalf("stale accepted: %+v %v", rejected, err)
 	}
-	s.Close()
+	_ = s.Close()
 	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	replay, err = s.Execute(context.Background(), id, conflict)
 	if err != nil || replay != rejected {
 		t.Fatal("rejection not retained across restart")
@@ -88,14 +88,28 @@ func TestMigrationPreservesExistingHistory(t *testing.T) {
 	if _, err = db.Exec("INSERT INTO rooms VALUES('room','hash',9999999999999,1); INSERT INTO messages(id,room_id,sender_id,client_id,request_hash,text,created_at) VALUES('msg','room','a','client','hash','legacy',1)"); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	state := snap(t, s, Identity{"room", "b"})
+	defer func() { _ = s.Close() }()
+	state := snap(t, s, Identity{Room: "room", Actor: "b"})
 	if len(state.Messages) != 1 || state.Messages[0].Text != "legacy" || state.Messages[0].Version != 1 {
 		t.Fatal("legacy data lost")
+	}
+}
+
+func TestPreRefactorCommandFingerprintStillReplays(t *testing.T) {
+	s, a, _ := fixture(t)
+	if _, err := s.db.Exec("INSERT INTO command_results VALUES(?,?,?,?,?)", a.Room, a.Actor, "legacy-command", "09a3379011f0286d129918e20770118fd2522053ce064a2ab877fc5e1819137b", `{"message_id":"legacy-result","revision":0}`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Execute(context.Background(), a, Command{ID: "legacy-command", Type: "command", Action: "send", ClientID: "legacy-client", Text: "hello"})
+	if err != nil || result.ErrorCode != "" || result.MessageID != "legacy-result" {
+		t.Fatalf("legacy outcome not replayed: %+v %v", result, err)
+	}
+	if len(snap(t, s, a).Messages) != 0 {
+		t.Fatal("replay repeated the mutation")
 	}
 }

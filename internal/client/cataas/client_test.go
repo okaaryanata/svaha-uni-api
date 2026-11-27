@@ -1,4 +1,4 @@
-package cats
+package cataas
 
 import (
 	"context"

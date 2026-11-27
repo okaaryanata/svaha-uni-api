@@ -1,14 +1,15 @@
-package chat
+package websocket
 
 import (
 	"context"
 	"encoding/json"
-	"github.com/coder/websocket"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestConversationSummaryUpdatesPerAccount(t *testing.T) {
@@ -93,7 +94,9 @@ func readPresence(t *testing.T, conn *websocket.Conn, wantB bool) {
 func setupPresence(t *testing.T) (*Store, *Server, *httptest.Server, string, string) {
 	t.Helper()
 	store, a, _ := fixture(t)
-	store.db.Exec("UPDATE rooms SET recovery_hash=? WHERE id=?", hash("recovery"), a.Room)
+	if _, err := store.db.Exec("UPDATE rooms SET recovery_hash=? WHERE id=?", hash("recovery"), a.Room); err != nil {
+		t.Fatal(err)
+	}
 	ta, _ := store.Login(context.Background(), a.Room, "recovery", "a")
 	tb, _ := store.Login(context.Background(), a.Room, "recovery", "b")
 	hub := NewServer(store, []string{testOrigin})
@@ -114,9 +117,9 @@ func TestPresenceTracksLastConnection(t *testing.T) {
 	b2 := socketClient(t, server.URL, tb)
 	readSnapshot(t, b2, func(Snapshot) bool { return true })
 	readPresence(t, a, true)
-	b1.CloseNow()
+	_ = b1.CloseNow()
 	readPresence(t, a, true)
-	b2.CloseNow()
+	_ = b2.CloseNow()
 	readPresence(t, a, false)
 }
 func TestPresenceDetectsFailedHeartbeat(t *testing.T) {
@@ -134,8 +137,8 @@ func TestPresenceDetectsFailedHeartbeat(t *testing.T) {
 func TestPresenceDoesNotLeakAcrossRooms(t *testing.T) {
 	s, _, _ := fixture(t)
 	hub := NewServer(s, nil)
-	a := &peer{id: Identity{"one", "a"}, queue: make(chan any, 4), cancel: func() {}}
-	b := &peer{id: Identity{"two", "b"}, queue: make(chan any, 4), cancel: func() {}}
+	a := &peer{id: Identity{Room: "one", Actor: "a"}, queue: make(chan any, 4), cancel: func() {}}
+	b := &peer{id: Identity{Room: "two", Actor: "b"}, queue: make(chan any, 4), cancel: func() {}}
 	hub.peers[a] = true
 	hub.peers[b] = true
 	hub.presenceLocked("one")
@@ -183,27 +186,29 @@ func TestOfflineDeliverySurvivesRestart(t *testing.T) {
 				t.Fatal(e)
 			}
 			var ack struct{ Type, ID string }
-			json.Unmarshal(data, &ack)
+			if err := json.Unmarshal(data, &ack); err != nil {
+				t.Fatal(err)
+			}
 			if ack.Type == "ack" && ack.ID == command.ID {
 				break
 			}
 		}
 		cancel()
 	}
-	apply(t, store, Identity{room, "a"}, Command{Action: "edit", MessageID: ids[0], Text: "offline edited"})
-	apply(t, store, Identity{room, "a"}, Command{Action: "revoke", MessageID: ids[1]})
-	a.CloseNow()
+	apply(t, store, Identity{Room: room, Actor: "a"}, Command{Action: "edit", MessageID: ids[0], Text: "offline edited"})
+	apply(t, store, Identity{Room: room, Actor: "a"}, Command{Action: "revoke", MessageID: ids[1]})
+	_ = a.CloseNow()
 	hub.Close()
 	server.Close()
-	store.Close()
+	_ = store.Close()
 	store, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	hub, server = start(store)
-	defer server.Close()
-	defer hub.Close()
+	defer func() { server.Close() }()
+	defer func() { hub.Close() }()
 	b := socketClient(t, server.URL, tb)
 	state := readSnapshot(t, b, func(Snapshot) bool { return true })
 	if len(state.Messages) != 3 || state.Messages[0].Text != "offline edited" || !state.Messages[1].Revoked || state.Messages[1].Text != "" || state.Conversation.UnreadCount != 2 || state.Conversation.LastMessage.ID != ids[2] {

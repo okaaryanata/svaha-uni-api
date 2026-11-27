@@ -1,0 +1,31 @@
+version: '2'
+run:
+  timeout: 3m
+linters:
+  default: standard
+  enable: [bodyclose, rowserrcheck, sqlclosecheck, errorlint, depguard]
+  settings:
+    depguard:
+      rules:
+        domain:
+          files: ['**/internal/domain/**/*.go']
+          deny:
+            - pkg: database/sql
+              desc: Domain rules must not depend on SQL.
+            - pkg: net/http
+              desc: Domain rules must not depend on HTTP.
+            - pkg: github.com/okaaryanata/svaha-uni-api/internal/repository
+              desc: Domain rules must not import adapters.
+        service:
+          files: ['**/internal/service/**/*.go']
+          deny:
+            - pkg: database/sql
+              desc: Services depend on repository ports, not SQL.
+            - pkg: net/http
+              desc: Transport belongs in handlers.
+            - pkg: github.com/okaaryanata/svaha-uni-api/internal/repository
+              desc: Services must not import concrete repositories.
+            - pkg: github.com/okaaryanata/svaha-uni-api/internal/handler
+              desc: Handlers depend on services, never the reverse.
+formatters:
+  enable: [gofmt, goimports]

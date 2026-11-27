@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/coder/websocket"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // This opt-in test exercises the deployed/dev frontend proxy, not just the hub.
@@ -27,7 +28,7 @@ func TestFrontendProxy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer res.Body.Close()
+		defer func() { _ = res.Body.Close() }()
 		if res.StatusCode >= 300 {
 			t.Fatalf("%s: %s", path, res.Status)
 		}
@@ -43,11 +44,11 @@ func TestFrontendProxy(t *testing.T) {
 		session := post("/api/v1/chat/sessions", map[string]any{"room_id": demo["room_id"], "recovery_token": demo["recovery_token"], "account_id": actor})
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"http://127.0.0.1:4173"}}})
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/api/v1/chat/ws", &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"http://127.0.0.1:4173"}}}) //nolint:bodyclose // coder/websocket owns and closes the handshake body.
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { conn.CloseNow() })
+		t.Cleanup(func() { _ = conn.CloseNow() })
 		payload, _ := json.Marshal(map[string]any{"type": "auth", "token": session["token"]})
 		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
 			t.Fatal(err)
@@ -78,7 +79,9 @@ func TestFrontendProxy(t *testing.T) {
 				Type     string
 				Messages []struct{ Text string }
 			}
-			json.Unmarshal(data, &event)
+			if err := json.Unmarshal(data, &event); err != nil {
+				t.Fatal(err)
+			}
 			if event.Type != "snapshot" || len(event.Messages) != count {
 				continue
 			}
