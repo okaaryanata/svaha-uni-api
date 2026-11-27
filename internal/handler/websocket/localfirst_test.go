@@ -99,3 +99,17 @@ func TestMigrationPreservesExistingHistory(t *testing.T) {
 		t.Fatal("legacy data lost")
 	}
 }
+
+func TestPreRefactorCommandFingerprintStillReplays(t *testing.T) {
+	s, a, _ := fixture(t)
+	if _, err := s.db.Exec("INSERT INTO command_results VALUES(?,?,?,?,?)", a.Room, a.Actor, "legacy-command", "09a3379011f0286d129918e20770118fd2522053ce064a2ab877fc5e1819137b", `{"message_id":"legacy-result","revision":0}`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Execute(context.Background(), a, Command{ID: "legacy-command", Type: "command", Action: "send", ClientID: "legacy-client", Text: "hello"})
+	if err != nil || result.ErrorCode != "" || result.MessageID != "legacy-result" {
+		t.Fatalf("legacy outcome not replayed: %+v %v", result, err)
+	}
+	if len(snap(t, s, a).Messages) != 0 {
+		t.Fatal("replay repeated the mutation")
+	}
+}

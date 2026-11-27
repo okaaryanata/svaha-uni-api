@@ -271,7 +271,7 @@ func (s *Service) apply(tx Transaction, id domain.Identity, c domain.Command) (s
 			err = tx.Pin(id.Room, messageID, c.Enabled)
 		case "read", "delivered":
 			if message.Sender == id.Actor {
-				return "", domain.ErrInvalid
+				return "", domain.ErrForbidden
 			}
 			err = tx.Receipt(id, messageID, c.Action == "read")
 		default:
