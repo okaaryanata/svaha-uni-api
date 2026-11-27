@@ -1,4 +1,4 @@
-# Oka Portfolio API
+# Svaha Uni API
 
 Standalone Go backend for Sudoku solving, random cat GIFs, and a two-account IM chat demo. The frontend lives in the sibling `../oka-portfolio` repository. This service uses SQLite and WebSockets and needs no external broker.
 
